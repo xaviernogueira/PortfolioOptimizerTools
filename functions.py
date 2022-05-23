@@ -58,3 +58,7 @@ def run_DCF_valuation(self, eps: float, three_year_eps_growth: float, decay_rate
         values.append(sum(future_pv))
 
     return values
+
+
+def get_greed_exponent(greed_value):
+    return

@@ -14,7 +14,7 @@ class Position:
     def __init__(self, ticker: str = None, current_price: float = None):
         if not ticker:
             self.ticker = None
-            print('WARNING: Empty position class initated, please provide a ticker in the')
+            print('WARNING: Empty position class initiated, please provide a ticker in the')
         else:
             # store ticker name
             self.ticker = str(ticker).capitalize()
@@ -78,7 +78,9 @@ class Position:
             self.valuations = run_DCF_valuation(eps, three_year_eps_growth, self.decay_rate,
                                                 historic_pe_ratios=historic_pe_ratios)
 
-    # #### INTERNAL METHODS - using individually may cause issues#####
+        return self.valuations
+
+    # #### INTERNAL METHODS - using individually may cause issues #####
     def _update_decay_rate(self, new_decay_rate):
         self.decay_rate = new_decay_rate
 
@@ -111,6 +113,7 @@ class Portfolio:
         self.tickers = []
         self.conservativeness = 0.5  # default is 0.5, but can range from 0 (no conservativeness) to 1 (max)
         self.greed = 0.5  # default is 0.5, but can range from 0 to 1. A higher value more strongly weights stock returns.
+        self.gamma = 0.2
 
         if isinstance(positions_dict, dict):
             for tick in list(positions_dict.keys()):
@@ -122,7 +125,9 @@ class Portfolio:
 
         # initialize dictionary to hold portfolio balance values
         self.raw_valuations = {}  # stores raw DCF expected return values for each position
-        self.expected_returns = {}
+        self.expected_returns = {}  # stores the expected return if the price returns to intrinsic value
+        self.greedy_returns = {}
+        self.balance_scores = {}
         self.overbalance_scores = {}  # will be zero unless a balance eq is used
 
     # #### METHODS TO GET INFORMATION FROM THE PORTOFLIO #####
@@ -142,6 +147,12 @@ class Portfolio:
                       f'Portfolio.update_current_prices({tick}: [# of shares, average price]) to provide values')
         return balance
 
+    def get_position_sizes(self):
+        tickers = self.get_tickers()
+        positions_info_dict = {}
+        for tick in tickers:
+            positions_info_dict[tick] = {}
+
     def verify_valuations(self) -> dict:
         """
         Used to check which positions in the portfolio have had completed DCF valuations
@@ -157,7 +168,15 @@ class Portfolio:
                 valuations_dict[tick] = f'DCF completed: low={low}, middle={mid}, high={high}'
         return valuations_dict
 
-    def get_optimal_allocations(self, current_prices_dict: dict = None, gamma: float = 0.05, greed: float = None):
+    def calculate_current_allocations(self) -> dict:
+        """
+        Uses current prices to calculate what % of the portfolio value is associated with each position
+        :return: a dictionary with tickers and their relative proportion
+        """
+        return
+
+    def get_optimal_allocations(self, current_prices_dict: dict = None, gamma: float = 0.05, greed: float = None,
+                                conservativeness: float = None):
         """
 
         :param current_prices_dict:
@@ -165,7 +184,42 @@ class Portfolio:
         :param greed: (optional) allows a greed value (float 0 - 1) that differs from the Portfolios setting to be used
         :return:
         """
-        return
+        # if current_prices_dict is provided, update prices
+        tickers = self.get_tickers()
+        if isinstance(current_prices_dict, dict):
+            self.update_current_prices(current_prices_dict)
+
+        # use custom parameters is input
+        if not gamma:
+            gamma = self.gamma
+        if not greed:
+            greed = self.greed
+
+        if not conservativeness:
+            conservativeness = self.conservativeness
+
+        # update expected returns
+        self.calculate_expected_roic(new_conservativeness=conservativeness)
+
+        # add greed re-weighting
+        greed_exponent = get_greed_exponent(greed)
+        self.add_greed_weights(greed_exponent)
+
+        # create portfolio_balancer weights
+        self.add_portolio_balancer(gamma)
+
+        # calculate optimal allocation
+        balanced_values = []
+        for tick in tickers:
+            balanced_values.append(self.greedy_returns[tick] * (1 + self.balance_scores[tick]))
+
+        balance_sum = sum(balanced_values)
+
+        optimal_allocations = {}
+        for i, tick in enumerate(tickers):
+            optimal_allocations[tick] = balanced_values[i] / balance_sum
+
+        return optimal_allocations
 
     # #### METHODS TO UPDATE PORTFOLIO VALUES OR POSITIONS #####
     def update_conservativeness(self, new_conservativeness: float):
@@ -333,9 +387,57 @@ class Portfolio:
         self.raw_valuations = valuations
         self.expected_returns = relative_values
 
+    def add_greed_weights(self, greed_exponent: float):
+        """
+        Raises expected returns by an exponent ranging 1 to 3 (corresponding to greed 0 - 1, 0.5 -> 2 is default)
+        :param greed_exponent: the greed exponent fom get_greed_exponent(self.greed)
+        :return:
+        """
+        expected_returns = self.expected_returns
+        for tick in expected_returns.keys():
+            greed_return = (float(expected_returns[tick]) ** greed_exponent)
+            self.greedy_returns[tick] = greed_return
+        return self.greedy_returns
+
+    def add_portolio_balancer(self, gamma: float = None, eta: float = 0.95):
+        if not gamma:
+            gamma = self.gamma
+
+        self.balance_scores = {}
+        allocations = self.calculate_current_allocations()
+        allocations_array = np.array(list(allocations.values()))
+        allocations_mean = np.mean(allocations_array)
+        allocations_std = np.std(allocations_array)
+
+        for tick in allocations.keys():
+            allocation = allocations[tick]
+            z_score = (allocation - allocations_mean) / allocations_std
+            balance_score = -z_score*gamma
+            if abs(balance_score) > eta:
+                if balance_score < 0:
+                    balance_score = -eta
+                else:
+                    balance_score = eta
+            self.balance_scores[tick] = balance_score
+        return self.balance_scores
+
     # #### INTERNAL METHODS - using may cause issues#####
     def _get_scenario_weightings(self):
         low = 0
         mid = 0
         high = 0
         return [low, mid, high]
+
+    def _positions_info_printer(self, positions_info_dict: dict):
+        for key in positions_info_dict.keys():
+            position_dict = positions_info_dict[key]
+            shares = position_dict['Shares']
+            equity = position_dict['Equity']
+            profit_loss = position_dict['Return_in_dollars']
+
+            print(f'------ TICKER: {key} ------\n'
+                  f'# of shares: {shares} \n'
+                  f'Current equity value: {equity}\n:'
+                  f'Total retrun in $: {profit_loss}\n')
+
+
